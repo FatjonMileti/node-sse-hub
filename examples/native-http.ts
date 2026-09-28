@@ -1,5 +1,5 @@
 /**
- * Native Node.js HTTP example for `sse-kit` — no framework required.
+ * Native Node.js HTTP example for `node-sse-hub` — no framework required.
  *
  * Run with:  node --loader ts-node/esm examples/native-http.ts
  * (or compile first and run the emitted JS).

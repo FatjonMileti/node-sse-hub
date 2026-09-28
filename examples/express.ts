@@ -1,5 +1,5 @@
 /**
- * Express example for `sse-kit`.
+ * Express example for `node-sse-hub`.
  *
  * Run with:  npx tsx examples/express.ts
  * (Express is only a dev-time example dependency pattern — the core
@@ -17,7 +17,7 @@ const app = express();
 app.use(express.json());
 
 // Open an SSE stream. Authenticate first (e.g. auth middleware) —
-// sse-kit intentionally leaves auth to the host application.
+// node-sse-hub intentionally leaves auth to the host application.
 app.get("/events", (req, res) => {
   sse.connect(req, res);
 });

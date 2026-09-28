@@ -1,22 +1,22 @@
 /**
- * Optional Redis integrations for `sse-kit`.
+ * Optional Redis integrations for `node-sse-hub`.
  *
- * Import from the `sse-kit/redis` subpath — never from the core entry —
+ * Import from the `node-sse-hub/redis` subpath — never from the core entry —
  * so applications that only need in-memory SSE never load Redis code:
  *
  * ```ts
- * import { RedisEventStore } from "sse-kit/redis";
+ * import { RedisEventStore } from "node-sse-hub/redis";
  * ```
  *
  * Requires the `redis-orm-lite` package (optional peer dependency):
  *
  * ```bash
- * npm install sse-kit redis-orm-lite
+ * npm install node-sse-hub redis-orm-lite
  * ```
  *
  * Retry behavior (backoff, jitter, transient-error classification) is
  * provided by `redis-orm-lite`, which itself builds on `node-retry-kit`.
- * `sse-kit` never re-implements retry logic.
+ * `node-sse-hub` never re-implements retry logic.
  */
 
 import { connectRedis, executeRedisCommand, RedisModel } from "redis-orm-lite";
@@ -57,7 +57,7 @@ export interface RedisEventStoreOptions {
   url?: string;
   /**
    * Prefix for all keys (`<prefix>:events:*`, `<prefix>:seq`,
-   * `<prefix>:index`). Default `"sse-kit"`. Use a unique prefix per
+   * `<prefix>:index`). Default `"node-sse-hub"`. Use a unique prefix per
    * test run / tenant to isolate histories.
    */
   keyPrefix?: string;
@@ -90,7 +90,7 @@ export interface RedisEventStoreOptions {
 }
 
 const DEFAULT_REDIS_URL = "redis://localhost:6379";
-const DEFAULT_KEY_PREFIX = "sse-kit";
+const DEFAULT_KEY_PREFIX = "node-sse-hub";
 const DEFAULT_MAX_EVENTS = 1000;
 
 /**
@@ -357,11 +357,11 @@ function toStoredEvent(doc: RedisEventDoc): StoredSSEEvent {
 export interface RedisEventBusOptions {
   /** Redis connection URL. Default `"redis://localhost:6379"`. */
   url?: string;
-  /** Pub/Sub channel. Default `"sse-kit:bus"`. */
+  /** Pub/Sub channel. Default `"node-sse-hub:bus"`. */
   channel?: string;
 }
 
-const DEFAULT_BUS_CHANNEL = "sse-kit:bus";
+const DEFAULT_BUS_CHANNEL = "node-sse-hub:bus";
 
 function isBusEnvelope(value: unknown): value is SSEBusEnvelope {
   if (value === null || typeof value !== "object") return false;

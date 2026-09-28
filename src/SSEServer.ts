@@ -1,5 +1,5 @@
 /**
- * The main entry point of `sse-kit`: creates, tracks, and cleans up SSE
+ * The main entry point of `node-sse-hub`: creates, tracks, and cleans up SSE
  * connections, and routes events to individual clients, all clients, or
  * topic subscribers.
  *
@@ -74,7 +74,7 @@ function asError(error: unknown): Error {
  *
  * @example
  * ```ts
- * import { SSEServer } from "sse-kit";
+ * import { SSEServer } from "node-sse-hub";
  *
  * const sse = new SSEServer({ heartbeatInterval: 30_000 });
  *

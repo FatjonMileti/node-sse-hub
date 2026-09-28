@@ -1,10 +1,10 @@
-# Redis example for `sse-kit`
+# Redis example for `node-sse-hub`
 
 Invoice-style SSE service with Redis-backed history (and optional
 multi-node live fan-out), using only native Node.js HTTP plus:
 
-- `sse-kit` — the SSE server
-- `sse-kit/redis` — `RedisEventStore` + `RedisEventBus` adapters
+- `node-sse-hub` — the SSE server
+- `node-sse-hub/redis` — `RedisEventStore` + `RedisEventBus` adapters
 - `redis-orm-lite` — Redis persistence (documents) and retry plumbing
 - `node-retry-kit` — pulled in transitively by `redis-orm-lite`
 
@@ -12,8 +12,8 @@ multi-node live fan-out), using only native Node.js HTTP plus:
 
 ```bash
 docker run -p 6379:6379 redis:7
-npm install sse-kit redis-orm-lite
-# from the sse-kit repo:
+npm install node-sse-hub redis-orm-lite
+# from the node-sse-hub repo:
 npx tsx examples/redis/server.ts
 ```
 

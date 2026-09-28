@@ -1,11 +1,11 @@
 /**
- * Pluggable event-history abstractions for `sse-kit`.
+ * Pluggable event-history abstractions for `node-sse-hub`.
  *
  * The {@link SSEServer} depends only on the {@link SSEEventStore}
  * interface — never on Redis or any other infrastructure. The default
  * path stays fully in-memory; persistence adapters (Redis, database,
  * …) implement this interface in optional subpath entries such as
- * `sse-kit/redis`.
+ * `node-sse-hub/redis`.
  */
 
 import { SSEError } from "./errors.js";
@@ -88,7 +88,7 @@ export interface SSEBusEnvelope {
  * Persistence alone does NOT make live broadcasting distributed: an
  * event broadcast on Node B never reaches clients on Node A unless the
  * nodes share a bus. A Redis Pub/Sub implementation lives in the
- * optional `sse-kit/redis` entry point.
+ * optional `node-sse-hub/redis` entry point.
  */
 export interface SSEEventBus {
   /** Publish an envelope to every subscribed node. */

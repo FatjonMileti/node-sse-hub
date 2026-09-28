@@ -1,5 +1,5 @@
 /**
- * Fastify example for `sse-kit` — no Fastify dependency required by the
+ * Fastify example for `node-sse-hub` — no Fastify dependency required by the
  * core package; we only use Fastify's raw Node req/res objects.
  *
  * Run with:  npx tsx examples/fastify.ts

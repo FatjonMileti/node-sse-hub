@@ -1,13 +1,13 @@
 /**
- * Redis-backed SSE example for `sse-kit` (invoice flow, native HTTP).
+ * Redis-backed SSE example for `node-sse-hub` (invoice flow, native HTTP).
  *
  * Architecture:
  *
  *   HTTP client
  *       ↓  GET /events (EventSource, auto-reconnects with Last-Event-ID)
- *   sse-kit (SSEServer)
+ *   node-sse-hub (SSEServer)
  *       ↓  history persistence (fire-and-forget, live-first)
- *   RedisEventStore (sse-kit/redis)
+ *   RedisEventStore (node-sse-hub/redis)
  *       ↓  documents via RedisModel, ordering via INCR + sorted set,
  *          retries via redis-orm-lite → node-retry-kit
  *   redis-orm-lite
@@ -16,7 +16,7 @@
  *
  * Run:
  *   1. docker run -p 6379:6379 redis:7
- *   2. npm install sse-kit redis-orm-lite
+ *   2. npm install node-sse-hub redis-orm-lite
  *   3. node --loader ts-node/esm examples/redis/server.ts
  *      (or compile first and run the emitted JS)
  *
@@ -34,7 +34,7 @@ import { RedisEventBus, RedisEventStore } from "../../src/redis.js";
 
 const store = new RedisEventStore({
   url: process.env["REDIS_URL"] ?? "redis://localhost:6379",
-  keyPrefix: "sse-kit:example",
+  keyPrefix: "node-sse-hub:example",
   maxEvents: 1000,
   retry: {
     retries: 5,
@@ -49,7 +49,7 @@ const store = new RedisEventStore({
 // Omit `bus` entirely for a single-process deployment.
 const bus = new RedisEventBus({
   url: process.env["REDIS_URL"] ?? "redis://localhost:6379",
-  channel: "sse-kit:example:bus",
+  channel: "node-sse-hub:example:bus",
 });
 
 const sse = new SSEServer({

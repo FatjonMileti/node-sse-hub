@@ -1,10 +1,10 @@
 /**
- * Error classes for `sse-kit`. Only a small set is provided — normal
+ * Error classes for `node-sse-hub`. Only a small set is provided — normal
  * lifecycle operations (e.g. disconnecting an unknown ID) return `false`
  * instead of throwing.
  */
 
-/** Base class for all `sse-kit` errors. */
+/** Base class for all `node-sse-hub` errors. */
 export class SSEError extends Error {
   override name = "SSEError";
 

@@ -1,7 +1,7 @@
 {
-  "name": "sse-kit",
+  "name": "node-sse-hub",
   "version": "0.2.0",
-  "description": "Lightweight, framework-friendly Server-Sent Events (SSE) library for Node.js",
+  "description": "Hub-centric Server-Sent Events (SSE) library for Node.js: connection registry, topics, replayable history, and optional Redis clustering",
   "type": "module",
   "main": "./dist/cjs/index.cjs",
   "module": "./dist/index.js",

@@ -1,5 +1,5 @@
 /**
- * Topics example for `sse-kit`: subscribe connections to rooms and
+ * Topics example for `node-sse-hub`: subscribe connections to rooms and
  * broadcast per-room updates.
  *
  * Run with:  npx tsx examples/topics.ts

@@ -1,5 +1,5 @@
 /**
- * Public TypeScript types for `sse-kit`.
+ * Public TypeScript types for `node-sse-hub`.
  *
  * The core package only depends on Node.js HTTP primitives so it can be
  * used with Express, Fastify, Node's native HTTP server, or any other
@@ -79,7 +79,7 @@ export interface HistoryOptions {
    * Custom storage backend. Accepts either the legacy synchronous
    * {@link SSEHistoryStore} (pre-formatted frames) or the async
    * {@link SSEEventStore} (structured events, e.g. `MemoryEventStore`
-   * or the Redis adapter from `sse-kit/redis`). Defaults to an
+   * or the Redis adapter from `node-sse-hub/redis`). Defaults to an
    * in-memory synchronous store.
    */
   store?: SSEHistoryStore | SSEEventStore;
@@ -160,7 +160,7 @@ export interface SSEServerOptions {
   serialize?: SSESerializer;
   /**
    * Optional distributed event bus (e.g. the Redis adapter from
-   * `sse-kit/redis`). When set, broadcasts are also published to the bus
+   * `node-sse-hub/redis`). When set, broadcasts are also published to the bus
    * and envelopes received from other nodes are delivered locally.
    * Core package has no bus implementation — this is an extension point.
    */

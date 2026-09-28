@@ -1,10 +1,10 @@
 /**
- * `sse-kit` — a lightweight, framework-friendly Server-Sent Events (SSE)
+ * `node-sse-hub` — a lightweight, framework-friendly Server-Sent Events (SSE)
  * library for Node.js.
  *
  * @example
  * ```ts
- * import { SSEServer } from "sse-kit";
+ * import { SSEServer } from "node-sse-hub";
  *
  * const sse = new SSEServer({ heartbeatInterval: 30_000 });
  *

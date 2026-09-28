@@ -1,4 +1,4 @@
-# sse-kit
+# node-sse-hub
 
 A lightweight, framework-friendly **Server-Sent Events (SSE)** library for Node.js.
 
@@ -6,17 +6,41 @@ Create SSE streams, send events to individual clients, broadcast to everyone, pu
 
 ## Why use it?
 
+- **Hub, not sessions** — one `SSEServer` tracks every connection by ID: broadcast with recipient counts, message one client by ID, disconnect by ID. No manual session bookkeeping.
 - **Framework-friendly** — works with Express, Fastify, Node's native HTTP server, or anything exposing Node `IncomingMessage` / `ServerResponse`. No framework dependencies.
 - **Correct SSE** — spec-compliant framing, multiline data, `retry`, comments, and `Last-Event-ID` handling.
-- **Topics** — subscribe connections to rooms and broadcast per-room.
-- **Replay** — optional in-memory event history replays missed events to reconnecting clients (with a pluggable store interface).
-- **Reliable** — heartbeat keep-alives, backpressure handling for slow clients, idempotent cleanup, graceful shutdown.
-- **Small** — zero runtime dependencies, strict TypeScript, ESM + CommonJS builds.
+- **Topics** — subscribe connections to rooms and broadcast per-room, with topic-tagged history.
+- **Replay** — pluggable async event-history stores (memory built in, Redis adapter included) replay missed events to reconnecting clients.
+- **Multi-node ready** — optional Redis Pub/Sub bus fans broadcasts out across Node instances.
+- **Reliable** — heartbeat keep-alives, backpressure strategies for slow clients, connection/payload caps, storage and bus error hooks, idempotent cleanup, graceful shutdown.
+- **Small** — zero required runtime dependencies, strict TypeScript, ESM + CommonJS builds.
+
+## How is it different from better-sse?
+
+[`better-sse`](https://github.com/MatthewWid/better-sse) is an excellent, mature, session-centric library: you create a session per request, hold the reference, and `push()` to it (plus channels, batching, and stream/iterable piping, with Fetch-API support for edge runtimes). Choose it for per-request streaming pipelines and non-Node runtimes.
+
+`node-sse-hub` takes the opposite, hub-centric shape and targets Node.js servers that need operational control:
+
+| Concern                 | better-sse                                   | node-sse-hub                                                              |
+| ----------------------- | -------------------------------------------- | ------------------------------------------------------------------------- |
+| Model                   | Sessions you hold and push to                | Central registry; address clients by ID                                   |
+| Broadcast result        | Fire-and-forget per session                  | Returns recipient count                                                   |
+| Rooms                   | Channels (register sessions)                 | Topics + per-topic broadcast + topic-tagged history                       |
+| Missed-event replay     | Exposes/trusts `Last-Event-ID` for app logic | Server-side replay from pluggable stores (memory, Redis, custom)          |
+| Persistence             | None built in                                | `RedisEventStore` with idempotent appends, global sequencing              |
+| Multi-node live fan-out | Not in scope                                 | Optional Redis Pub/Sub `SSEEventBus`                                      |
+| Slow consumers          | Backpressure via streams                     | Bounded per-connection queue with `disconnect` / `drop-oldest` strategies |
+| Failure hooks           | Session errors                               | `storageError` / `busError` without breaking live delivery                |
+| Runtimes                | Node + Fetch API (Bun, Deno, edge)           | Node.js (`IncomingMessage` / `ServerResponse`)                            |
+
+## A note on the name
+
+This package was initially developed as `sse-kit`, but that name is already taken on npm by an unrelated client-side toolkit (web/mini-programs/React Native, by ecomfe) — a server library cannot ship under it. `node-sse-hub` reflects what this package actually is: a Node.js hub for SSE connections. If you are migrating from the unpublished `0.x` `sse-kit` sources: update imports to `node-sse-hub` / `node-sse-hub/redis`, and note the default Redis key prefix and bus channel changed from `sse-kit*` to `node-sse-hub*` (existing histories under the old prefix are left untouched — point the new store at the old `keyPrefix` if you need to keep reading them).
 
 ## Installation
 
 ```bash
-npm install sse-kit
+npm install node-sse-hub
 ```
 
 Requires Node.js 18+.
@@ -24,7 +48,7 @@ Requires Node.js 18+.
 ## Quick start
 
 ```ts
-import { SSEServer } from "sse-kit";
+import { SSEServer } from "node-sse-hub";
 
 const sse = new SSEServer({ heartbeatInterval: 30_000 });
 
@@ -39,7 +63,7 @@ sse.broadcast({ event: "ping", data: { ok: true } });
 
 ```ts
 import express from "express";
-import { SSEServer } from "sse-kit";
+import { SSEServer } from "node-sse-hub";
 
 const sse = new SSEServer({ heartbeatInterval: 30_000 });
 const app = express();
@@ -57,7 +81,7 @@ See [`examples/express.ts`](examples/express.ts).
 
 ```ts
 import { createServer } from "node:http";
-import { SSEServer } from "sse-kit";
+import { SSEServer } from "node-sse-hub";
 
 const sse = new SSEServer({ heartbeatInterval: 30_000 });
 
@@ -181,7 +205,7 @@ sse.onConnection((connection, context) => {
 });
 ```
 
-`sse-kit` does **not** pretend to replay events it doesn't have: replay only happens when `history.enabled` is `true` (below). Without history, `lastEventId` is exposed so your application can implement its own catch-up logic (e.g. query a database).
+`node-sse-hub` does **not** pretend to replay events it doesn't have: replay only happens when `history.enabled` is `true` (below). Without history, `lastEventId` is exposed so your application can implement its own catch-up logic (e.g. query a database).
 
 ## Event replay / history
 
@@ -207,7 +231,7 @@ Limitations (by design):
 - No external store is bundled (no Redis dependency). Implement `SSEHistoryStore` to persist elsewhere:
 
 ```ts
-import type { SSEHistoryStore } from "sse-kit";
+import type { SSEHistoryStore } from "node-sse-hub";
 
 const sse = new SSEServer({
   history: { enabled: true, maxEvents: 1000, store: myStore },
@@ -219,7 +243,7 @@ const sse = new SSEServer({
 For out-of-process backends, implement the async interface instead:
 
 ```ts
-import type { SSEEventStore, StoredSSEEvent } from "sse-kit";
+import type { SSEEventStore, StoredSSEEvent } from "node-sse-hub";
 
 const store: SSEEventStore = {
   append: (event: StoredSSEEvent) => ...,
@@ -249,16 +273,16 @@ Two behavioral notes for async stores: persistence runs through a serialized que
 Memory history is simple and single-process. Redis history gives you persistent, shared storage: multiple application instances (or restarts) can access the same event history.
 
 ```bash
-npm install sse-kit redis-orm-lite
+npm install node-sse-hub redis-orm-lite
 ```
 
 ```ts
-import { SSEServer } from "sse-kit";
-import { RedisEventStore } from "sse-kit/redis";
+import { SSEServer } from "node-sse-hub";
+import { RedisEventStore } from "node-sse-hub/redis";
 
 const store = new RedisEventStore({
   url: "redis://localhost:6379",
-  keyPrefix: "sse-kit", // isolates this app's keys
+  keyPrefix: "node-sse-hub", // isolates this app's keys
   maxEvents: 10_000, // oldest-first eviction, managed by the store
   retry: {
     retries: 5,
@@ -288,10 +312,10 @@ Consistency model (broadcast-first, persist-after): `broadcast()` delivers to li
 
 ## Retry integration
 
-Retries come from `redis-orm-lite`, which builds on `node-retry-kit` — `sse-kit` never re-implements retry logic and you don't need `node-retry-kit` installed directly:
+Retries come from `redis-orm-lite`, which builds on `node-retry-kit` — `node-sse-hub` never re-implements retry logic and you don't need `node-retry-kit` installed directly:
 
 ```bash
-npm install sse-kit redis-orm-lite   # node-retry-kit arrives transitively
+npm install node-sse-hub redis-orm-lite   # node-retry-kit arrives transitively
 ```
 
 Pass a retry policy to `RedisEventStore` and it is forwarded (per-operation, never global) to every Redis round-trip:
@@ -320,7 +344,7 @@ Important limitation: Redis history alone does **not** make live broadcasting di
 For multi-node fan-out, attach a bus:
 
 ```ts
-import { RedisEventBus } from "sse-kit/redis";
+import { RedisEventBus } from "node-sse-hub/redis";
 
 const sse = new SSEServer({
   bus: new RedisEventBus({ channel: "my-app:bus" }),
@@ -342,14 +366,14 @@ Every broadcast is then also published to the bus; each subscribed node delivers
 
 The core package only defines the `SSEEventBus` interface (`publish`/`subscribe`/`close`) — the Redis transport is optional, and custom transports (NATS, Postgres `LISTEN`, …) can implement the same interface. Without a bus, use sticky sessions so `Last-Event-ID` reconnects land on the node holding the relevant history (or share one Redis store, since history lookups work from any node).
 
-> **Packaging note:** `sse-kit/redis` uses static imports of the
+> **Packaging note:** `node-sse-hub/redis` uses static imports of the
 > `redis-orm-lite` public API, so it loads under bundlers, Vitest, and
-> CommonJS (`require("sse-kit/redis")`) everywhere. Pure-Node ESM
-> (`import … from "sse-kit/redis"`) additionally requires a
+> CommonJS (`require("node-sse-hub/redis")`) everywhere. Pure-Node ESM
+> (`import … from "node-sse-hub/redis"`) additionally requires a
 > `redis-orm-lite` build whose ESM output uses file extensions —
 > `redis-orm-lite@1.1.0`'s ESM entry uses extensionless relative imports
 > and therefore only resolves under bundlers/CJS today. Until that is
-> fixed upstream, prefer `require("sse-kit/redis")` (or a bundler) when
+> fixed upstream, prefer `require("node-sse-hub/redis")` (or a bundler) when
 > running on plain Node ESM.
 
 ## Heartbeats
@@ -425,12 +449,12 @@ const sse = new SSEServer({
 
 ## Installation matrix
 
-| You want                      | Install                                                                                                                |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| SSE only                      | `npm install sse-kit`                                                                                                  |
-| SSE + Redis history           | `npm install sse-kit redis-orm-lite`                                                                                   |
-| SSE + Redis history + retries | `npm install sse-kit redis-orm-lite` (`node-retry-kit` arrives transitively; configure via the store's `retry` option) |
-| Multi-node live fan-out       | same as above + `new RedisEventBus(...)` (Redis Pub/Sub)                                                               |
+| You want                      | Install                                                                                                                     |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| SSE only                      | `npm install node-sse-hub`                                                                                                  |
+| SSE + Redis history           | `npm install node-sse-hub redis-orm-lite`                                                                                   |
+| SSE + Redis history + retries | `npm install node-sse-hub redis-orm-lite` (`node-retry-kit` arrives transitively; configure via the store's `retry` option) |
+| Multi-node live fan-out       | same as above + `new RedisEventBus(...)` (Redis Pub/Sub)                                                                    |
 
 ## TypeScript usage
 
@@ -443,7 +467,7 @@ import type {
   HeartbeatOptions,
   HistoryOptions,
   Topic,
-} from "sse-kit";
+} from "node-sse-hub";
 
 const event: SSEEvent<{ invoiceId: string }> = {
   id: "event-123",
@@ -482,7 +506,7 @@ const event: SSEEvent<{ invoiceId: string }> = {
 
 Error classes: `SSEError` (base), `ConnectionNotFoundError`, `SSEClosedError`, `TopicNotFoundError`. Normal lifecycle misses (unknown IDs, empty topics) return `false`/`0`/`[]` rather than throwing.
 
-`sse-kit/redis` adds: `RedisEventStore` (+ `RedisEventStoreOptions`), `RedisEventBus` (+ `RedisEventBusOptions`), re-exported `RedisRetryOptions` / `OperationOptions` types. Core adds: `MemoryEventStore`, `SSEEventStore`, `StoredSSEEvent`, `SSEEventBus`, `SSEBusEnvelope`, `GetAfterOptions`.
+`node-sse-hub/redis` adds: `RedisEventStore` (+ `RedisEventStoreOptions`), `RedisEventBus` (+ `RedisEventBusOptions`), re-exported `RedisRetryOptions` / `OperationOptions` types. Core adds: `MemoryEventStore`, `SSEEventStore`, `StoredSSEEvent`, `SSEEventBus`, `SSEBusEnvelope`, `GetAfterOptions`.
 
 ## Performance considerations
 
@@ -496,7 +520,7 @@ Error classes: `SSEError` (base), `ConnectionNotFoundError`, `SSEClosedError`, `
 
 - Single-process only: history and connections live in memory. Multi-server deployments need sticky sessions (so `Last-Event-ID` reconnects land where history lives) or a shared `SSEHistoryStore`.
 - History replay is positional over a global log (not per-topic); direct messages are excluded from history.
-- `EventSource` supports GET-only streams without custom headers — authentication typically happens via cookies, signed URLs, or a pre-handshake; `sse-kit` leaves auth to the host app.
+- `EventSource` supports GET-only streams without custom headers — authentication typically happens via cookies, signed URLs, or a pre-handshake; `node-sse-hub` leaves auth to the host app.
 - Browser `EventSource` does not let you set `Last-Event-ID` manually on first connect; the browser manages it from received `id:` fields.
 
 ## Browser example

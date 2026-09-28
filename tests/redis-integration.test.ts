@@ -14,7 +14,7 @@ import { createMocks, sleep } from "./helpers.js";
 
 const enabled = process.env["SSE_KIT_TEST_REDIS"] === "1";
 const url = process.env["SSE_KIT_TEST_REDIS_URL"] ?? "redis://localhost:6379";
-const prefix = `sse-kit:itest:${process.pid}`;
+const prefix = `node-sse-hub:itest:${process.pid}`;
 
 describe.skipIf(!enabled)("redis integration (real server)", () => {
   let store: RedisEventStore;

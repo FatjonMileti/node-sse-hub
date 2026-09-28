@@ -1,6 +1,6 @@
 /**
  * ESM loader fixture for isolation tests: makes `redis-orm-lite` and
- * `node-retry-kit` unresolvable so tests can prove the `sse-kit` core
+ * `node-retry-kit` unresolvable so tests can prove the `node-sse-hub` core
  * never loads them.
  */
 export async function resolve(specifier, context, next) {

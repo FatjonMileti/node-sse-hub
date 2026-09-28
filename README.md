@@ -33,9 +33,6 @@ Create SSE streams, send events to individual clients, broadcast to everyone, pu
 | Failure hooks           | Session errors                               | `storageError` / `busError` without breaking live delivery                |
 | Runtimes                | Node + Fetch API (Bun, Deno, edge)           | Node.js (`IncomingMessage` / `ServerResponse`)                            |
 
-## A note on the name
-
-This package was initially developed as `sse-kit`, but that name is already taken on npm by an unrelated client-side toolkit (web/mini-programs/React Native, by ecomfe) — a server library cannot ship under it. `node-sse-hub` reflects what this package actually is: a Node.js hub for SSE connections. If you are migrating from the unpublished `0.x` `sse-kit` sources: update imports to `node-sse-hub` / `node-sse-hub/redis`, and note the default Redis key prefix and bus channel changed from `sse-kit*` to `node-sse-hub*` (existing histories under the old prefix are left untouched — point the new store at the old `keyPrefix` if you need to keep reading them).
 
 ## Installation
 

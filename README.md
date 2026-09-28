@@ -214,6 +214,144 @@ const sse = new SSEServer({
 });
 ```
 
+### Async event stores
+
+For out-of-process backends, implement the async interface instead:
+
+```ts
+import type { SSEEventStore, StoredSSEEvent } from "sse-kit";
+
+const store: SSEEventStore = {
+  append: (event: StoredSSEEvent) => ...,
+  getAfter: (lastEventId: string) => ...,
+  getRecent: (limit: number) => ...,
+  clear: () => ...,
+};
+
+const sse = new SSEServer({ history: { enabled: true, store } });
+```
+
+The built-in `MemoryEventStore` is the reference implementation:
+
+```ts
+const sse = new SSEServer({
+  history: {
+    enabled: true,
+    store: new MemoryEventStore({ maxEvents: 1000 }),
+  },
+});
+```
+
+Two behavioral notes for async stores: persistence runs through a serialized queue (order-preserving) and reconnect replay resolves shortly after `connect()` returns, so events broadcast concurrently with a reconnect can arrive before replayed history — clients should order/dedupe by `id`. `await sse.flushHistory()` waits for all enqueued writes to settle. Failures surface via `sse.onStorageError(...)` and never break live delivery.
+
+## Redis integration
+
+Memory history is simple and single-process. Redis history gives you persistent, shared storage: multiple application instances (or restarts) can access the same event history.
+
+```bash
+npm install sse-kit redis-orm-lite
+```
+
+```ts
+import { SSEServer } from "sse-kit";
+import { RedisEventStore } from "sse-kit/redis";
+
+const store = new RedisEventStore({
+  url: "redis://localhost:6379",
+  keyPrefix: "sse-kit", // isolates this app's keys
+  maxEvents: 10_000, // oldest-first eviction, managed by the store
+  retry: {
+    retries: 5,
+    backoff: "exponential",
+    delay: 500,
+    maxDelay: 10_000,
+    jitter: true,
+  },
+});
+
+const sse = new SSEServer({ history: { enabled: true, store } });
+
+sse.onStorageError((error) => {
+  console.error("history persistence failed (live delivery unaffected)", error);
+});
+```
+
+How it works (no ORM knowledge required — the adapter hides it):
+
+- Event documents are stored with `redis-orm-lite`'s `RedisModel` under `<prefix>:events:<eventId>` as whole-document overwrites, so re-appending the same ID is idempotent — retries can never create duplicate logical events.
+- Ordering never relies on sorting IDs (UUIDs don't sort chronologically). Each append takes a Redis-side atomic `INCR <prefix>:seq` sequence, and an index sorted set (`<prefix>:index`, member = event ID, score = sequence) makes replay a positional lookup.
+- `getAfter(lastEventId)` resolves the anchor's sequence, then reads everything scored after it. Unknown anchors replay nothing, same as memory history.
+- `data` payloads must be JSON-serializable (they round-trip through Redis).
+- `close()` on the server intentionally leaves a Redis store intact (it may be shared); call `store.close()` yourself on shutdown, and `store.clear()` only when you really mean to wipe history.
+
+Consistency model (broadcast-first, persist-after): `broadcast()` delivers to live clients synchronously and returns the recipient count, then persists asynchronously. A Redis outage therefore never fails or delays live delivery — the trade-off is a small crash window where a delivered event isn't yet persisted. If you need write-through instead, `await store.append(...)` yourself before broadcasting, or `await sse.flushHistory()` at shutdown.
+
+## Retry integration
+
+Retries come from `redis-orm-lite`, which builds on `node-retry-kit` — `sse-kit` never re-implements retry logic and you don't need `node-retry-kit` installed directly:
+
+```bash
+npm install sse-kit redis-orm-lite   # node-retry-kit arrives transitively
+```
+
+Pass a retry policy to `RedisEventStore` and it is forwarded (per-operation, never global) to every Redis round-trip:
+
+```ts
+new RedisEventStore({
+  retry: {
+    retries: 5, // retries after the first attempt; 0/absent = single attempt
+    backoff: "exponential", // or "fixed"
+    delay: 500, // base delay in ms
+    maxDelay: 10_000, // cap in ms
+    jitter: true, // avoid thundering herds
+    timeout: 2000, // per-attempt timeout in ms (optional)
+    reads: true, // retry reads (default true)
+    writes: true, // retry writes — safe: whole-doc SET/DEL are idempotent
+  },
+});
+```
+
+Only transient failures retry (connection resets, timeouts, `TRYAGAIN`/`LOADING`/`BUSY` server states, classified by `redis-orm-lite`'s `isTransientRedisError`). Permanent errors (wrong password, `WRONGTYPE`, bad commands) and aborts never retry. Without a `retry` policy every command runs exactly once.
+
+## Distributed systems: persistence ≠ live broadcast
+
+Important limitation: Redis history alone does **not** make live broadcasting distributed. If a client is connected to Node A and an event is broadcast via Node B's `sse.broadcast(...)`, Node A's clients won't see it — each server only knows its own sockets.
+
+For multi-node fan-out, attach a bus:
+
+```ts
+import { RedisEventBus } from "sse-kit/redis";
+
+const sse = new SSEServer({
+  bus: new RedisEventBus({ channel: "my-app:bus" }),
+  nodeId: "node-a", // defaults to a random UUID
+});
+```
+
+Every broadcast is then also published to the bus; each subscribed node delivers it to its local clients (loop-safe via the envelope's `origin`, topic-aware for `to(...)` broadcasts). Remote events are recorded in each node's local history. Bus failures surface via `sse.onBusError(...)` and never break local delivery.
+
+```text
+              Redis Pub/Sub
+                    │
+        ┌───────────┴───────────┐
+        ↓                       ↓
+     Node A                  Node B
+        ↓                       ↓
+   SSE clients              SSE clients
+```
+
+The core package only defines the `SSEEventBus` interface (`publish`/`subscribe`/`close`) — the Redis transport is optional, and custom transports (NATS, Postgres `LISTEN`, …) can implement the same interface. Without a bus, use sticky sessions so `Last-Event-ID` reconnects land on the node holding the relevant history (or share one Redis store, since history lookups work from any node).
+
+> **Packaging note:** `sse-kit/redis` uses static imports of the
+> `redis-orm-lite` public API, so it loads under bundlers, Vitest, and
+> CommonJS (`require("sse-kit/redis")`) everywhere. Pure-Node ESM
+> (`import … from "sse-kit/redis"`) additionally requires a
+> `redis-orm-lite` build whose ESM output uses file extensions —
+> `redis-orm-lite@1.1.0`'s ESM entry uses extensionless relative imports
+> and therefore only resolves under bundlers/CJS today. Until that is
+> fixed upstream, prefer `require("sse-kit/redis")` (or a bundler) when
+> running on plain Node ESM.
+
 ## Heartbeats
 
 ```ts
@@ -280,8 +418,19 @@ const sse = new SSEServer({
   maxTopicsPerConnection: 100, // subscription cap per connection
   maxEventBytes: 1_048_576, // max serialized frame size (1 MiB)
   serialize: (data) => JSON.stringify(data),
+  bus: undefined, // optional SSEEventBus for multi-node fan-out
+  nodeId: undefined, // stable bus node ID (defaults to random UUID)
 });
 ```
+
+## Installation matrix
+
+| You want                      | Install                                                                                                                |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| SSE only                      | `npm install sse-kit`                                                                                                  |
+| SSE + Redis history           | `npm install sse-kit redis-orm-lite`                                                                                   |
+| SSE + Redis history + retries | `npm install sse-kit redis-orm-lite` (`node-retry-kit` arrives transitively; configure via the store's `retry` option) |
+| Multi-node live fan-out       | same as above + `new RedisEventBus(...)` (Redis Pub/Sub)                                                               |
 
 ## TypeScript usage
 
@@ -306,29 +455,34 @@ const event: SSEEvent<{ invoiceId: string }> = {
 
 ## API reference
 
-| Method                                      | Description                                        |
-| ------------------------------------------- | -------------------------------------------------- |
-| `new SSEServer(options?)`                   | Create a server instance                           |
-| `sse.connect(req, res, opts?)`              | Accept a client; returns `SSEConnection`           |
-| `sse.broadcast(event)` / `sse.send(event)`  | Send to all clients; returns recipient count       |
-| `sse.sendTo(id, event)`                     | Send to one client; returns `boolean`              |
-| `sse.to(topic).broadcast(event)`            | Send to topic subscribers; returns count           |
-| `sse.disconnect(id)`                        | Close a client; returns `boolean`                  |
-| `sse.getConnection(id)`                     | Look up a client                                   |
-| `sse.getConnections()`                      | All connected clients                              |
-| `sse.getTopics()`                           | Topics with ≥1 subscriber                          |
-| `sse.getTopicSubscribers(topic)`            | Subscribed connections                             |
-| `sse.getTopicSubscriberCount(topic)`        | Subscriber count                                   |
-| `sse.getStats()`                            | `{ connections, topics, historySize, closed }`     |
-| `sse.on / once / off`                       | Typed `connection` / `disconnect` / `error` events |
-| `sse.onConnection / onDisconnect / onError` | Convenience listener aliases                       |
-| `await sse.close()`                         | Graceful shutdown (idempotent)                     |
-| `connection.send(event)`                    | Send to this client                                |
-| `connection.subscribe / unsubscribe(topic)` | Manage topic membership                            |
-| `connection.getTopics()`                    | This client's topics                               |
-| `connection.close()`                        | Close this client (idempotent)                     |
+| Method                                      | Description                                                                      |
+| ------------------------------------------- | -------------------------------------------------------------------------------- |
+| `new SSEServer(options?)`                   | Create a server instance                                                         |
+| `sse.connect(req, res, opts?)`              | Accept a client; returns `SSEConnection`                                         |
+| `sse.broadcast(event)` / `sse.send(event)`  | Send to all clients; returns recipient count                                     |
+| `sse.sendTo(id, event)`                     | Send to one client; returns `boolean`                                            |
+| `sse.to(topic).broadcast(event)`            | Send to topic subscribers; returns count                                         |
+| `sse.disconnect(id)`                        | Close a client; returns `boolean`                                                |
+| `sse.getConnection(id)`                     | Look up a client                                                                 |
+| `sse.getConnections()`                      | All connected clients                                                            |
+| `sse.getTopics()`                           | Topics with ≥1 subscriber                                                        |
+| `sse.getTopicSubscribers(topic)`            | Subscribed connections                                                           |
+| `sse.getTopicSubscriberCount(topic)`        | Subscriber count                                                                 |
+| `sse.getStats()`                            | `{ connections, topics, historySize, closed }`                                   |
+| `sse.on / once / off`                       | Typed `connection` / `disconnect` / `error` / `storageError` / `busError` events |
+| `sse.onConnection / onDisconnect / onError` | Convenience listener aliases                                                     |
+| `sse.onStorageError / onBusError`           | Async persistence / bus failure hooks (live delivery unaffected)                 |
+| `sse.getEventStore()`                       | The configured history store                                                     |
+| `await sse.flushHistory()`                  | Wait for enqueued history writes to settle                                       |
+| `await sse.close()`                         | Graceful shutdown (idempotent)                                                   |
+| `connection.send(event)`                    | Send to this client                                                              |
+| `connection.subscribe / unsubscribe(topic)` | Manage topic membership                                                          |
+| `connection.getTopics()`                    | This client's topics                                                             |
+| `connection.close()`                        | Close this client (idempotent)                                                   |
 
 Error classes: `SSEError` (base), `ConnectionNotFoundError`, `SSEClosedError`, `TopicNotFoundError`. Normal lifecycle misses (unknown IDs, empty topics) return `false`/`0`/`[]` rather than throwing.
+
+`sse-kit/redis` adds: `RedisEventStore` (+ `RedisEventStoreOptions`), `RedisEventBus` (+ `RedisEventBusOptions`), re-exported `RedisRetryOptions` / `OperationOptions` types. Core adds: `MemoryEventStore`, `SSEEventStore`, `StoredSSEEvent`, `SSEEventBus`, `SSEBusEnvelope`, `GetAfterOptions`.
 
 ## Performance considerations
 

@@ -26,6 +26,15 @@ export {
   DEFAULT_SERIALIZE,
   HEARTBEAT_COMMENT,
 } from "./SSEEvent.js";
+export { MemoryEventStore, isLegacyHistoryStore } from "./store.js";
+export type {
+  StoredSSEEvent,
+  SSEEventStore,
+  SSEEventBus,
+  SSEBusEnvelope,
+  GetAfterOptions,
+  MemoryEventStoreOptions,
+} from "./store.js";
 export { TopicManager, MAX_TOPIC_LENGTH } from "./TopicManager.js";
 export {
   SSEError,
@@ -48,6 +57,8 @@ export type {
   ConnectionListener,
   DisconnectListener,
   ErrorListener,
+  StorageErrorListener,
+  BusErrorListener,
   TopicBroadcaster,
   SSEServerStats,
 } from "./types.js";

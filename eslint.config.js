@@ -21,4 +21,18 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // Test fakes implement async contracts (SSEEventStore, Redis client
+    // surface, retry callbacks), so `async` without `await` is
+    // intentional there rather than a bug.
+    files: ["tests/**/*.ts"],
+    rules: {
+      "@typescript-eslint/require-await": "off",
+    },
+  },
+  {
+    // Plain-JS fixtures outside the TS project: untyped lint only.
+    files: ["tests/fixtures/*.mjs"],
+    ...tseslint.configs.disableTypeChecked,
+  },
 );

@@ -2,8 +2,13 @@
  * The main entry point of `sse-kit`: creates, tracks, and cleans up SSE
  * connections, and routes events to individual clients, all clients, or
  * topic subscribers.
+ *
+ * History storage and inter-node fan-out are both pluggable: the server
+ * depends on the {@link SSEEventStore} / {@link SSEEventBus} abstractions
+ * and never on Redis or any other infrastructure.
  */
 
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { SSEConnection } from "./SSEConnection.js";
@@ -14,8 +19,16 @@ import {
   InMemoryHistoryStore,
   parseLastEventId,
 } from "./SSEEvent.js";
+import {
+  isLegacyHistoryStore,
+  type SSEBusEnvelope,
+  type SSEEventBus,
+  type SSEEventStore,
+  type StoredSSEEvent,
+} from "./store.js";
 import { TopicManager } from "./TopicManager.js";
 import type {
+  BusErrorListener,
   ConnectOptions,
   ConnectionListener,
   DisconnectListener,
@@ -27,6 +40,7 @@ import type {
   SSEServerOptions,
   SSEServerStats,
   SlowClientStrategy,
+  StorageErrorListener,
   Topic,
   TopicBroadcaster,
 } from "./types.js";
@@ -42,7 +56,13 @@ export type SSEServerEventMap = {
   connection: [connection: SSEConnection, context: SSEConnectionContext];
   disconnect: [connection: SSEConnection];
   error: [error: Error, connection?: SSEConnection];
+  storageError: [error: Error];
+  busError: [error: Error];
 };
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new SSEError(String(error));
+}
 
 /**
  * Framework-agnostic SSE server. Works with Express, Fastify, Node's
@@ -62,14 +82,17 @@ export type SSEServerEventMap = {
  *   sse.connect(req, res);
  * });
  *
- * sse.broadcast({ event: "ping", data: "hello" });
+ * sse.broadcast({ event: "ping", data: { ok: true } });
  * ```
  */
 export class SSEServer extends EventEmitter {
   readonly #connections = new Map<string, SSEConnection>();
   readonly #topics = new TopicManager();
-  readonly #history: SSEHistoryStore;
+  readonly #history: SSEHistoryStore | SSEEventStore;
+  readonly #asyncStore: SSEEventStore | undefined;
   readonly #historyEnabled: boolean;
+  readonly #bus: SSEEventBus | undefined;
+  readonly #nodeId: string;
 
   readonly #generateEventId: boolean;
   readonly #heartbeatInterval: number;
@@ -82,9 +105,12 @@ export class SSEServer extends EventEmitter {
   readonly #serialize: SSESerializer;
 
   #nextEventId = 1;
+  #nextSequence = 1;
   #heartbeatTimer: NodeJS.Timeout | undefined;
   #closed = false;
   #closePromise: Promise<void> | undefined;
+  #persistQueue: Promise<void> = Promise.resolve();
+  #unsubscribeBus: (() => void) | undefined;
 
   constructor(options: SSEServerOptions = {}) {
     super();
@@ -121,6 +147,25 @@ export class SSEServer extends EventEmitter {
     } else {
       this.#history = new InMemoryHistoryStore(maxEvents);
     }
+    this.#asyncStore = isLegacyHistoryStore(this.#history)
+      ? undefined
+      : this.#history;
+
+    this.#bus = options.bus;
+    this.#nodeId = options.nodeId ?? randomUUID();
+    if (this.#bus !== undefined) {
+      const bus = this.#bus;
+      void bus
+        .subscribe((envelope) => {
+          this.#ingestRemote(envelope);
+        })
+        .then((unsubscribe) => {
+          this.#unsubscribeBus = unsubscribe;
+        })
+        .catch((error: unknown) => {
+          this.emit("busError", asError(error));
+        });
+    }
 
     if (this.#heartbeatInterval > 0) {
       this.#startHeartbeat();
@@ -139,12 +184,39 @@ export class SSEServer extends EventEmitter {
     return this.#connections.size;
   }
 
+  /** This node's ID on the event bus (for loop prevention). */
+  get nodeId(): string {
+    return this.#nodeId;
+  }
+
+  /**
+   * The configured history store (legacy sync or async), regardless of
+   * whether history is enabled.
+   */
+  getEventStore(): SSEHistoryStore | SSEEventStore {
+    return this.#history;
+  }
+
+  /**
+   * Resolve when every history write enqueued so far has settled.
+   * Useful in tests and for write-through guarantees before shutdown.
+   * Never rejects — persist failures surface via `"storageError"`.
+   */
+  flushHistory(): Promise<void> {
+    return this.#persistQueue;
+  }
+
   // -------------------------------------------------------------- lifecycle
 
   /**
    * Accept an SSE connection. Sets the required SSE headers, registers
    * disconnect detection, replays missed events when history is enabled
    * and the client sent `Last-Event-ID`, and emits `"connection"`.
+   *
+   * Replay from synchronous stores happens inline; replay from async
+   * stores (Redis, …) resolves shortly after `connect()` returns. Events
+   * broadcast concurrently with a reconnect may arrive before replayed
+   * history — clients should order/dedupe by event `id`.
    *
    * @returns The new connection (with a unique `connection.id`).
    * @throws {@link SSEClosedError} if the server is closed.
@@ -206,11 +278,15 @@ export class SSEServer extends EventEmitter {
     req.on("close", cleanup);
     res.on("close", cleanup);
 
-    // Replay missed events (history entries already carry assigned IDs).
+    // Replay missed events when the client is reconnecting.
     if (lastEventId !== undefined && this.#historyEnabled) {
-      for (const entry of this.#history.getAfter(lastEventId)) {
-        if (connection.closed) break;
-        connection.writeFrame(entry.frame);
+      if (this.#asyncStore !== undefined) {
+        void this.#replayFromStore(connection, lastEventId);
+      } else if (isLegacyHistoryStore(this.#history)) {
+        for (const entry of this.#history.getAfter(lastEventId)) {
+          if (connection.closed) break;
+          connection.writeFrame(entry.frame);
+        }
       }
     }
 
@@ -258,53 +334,163 @@ export class SSEServer extends EventEmitter {
 
   /**
    * Format an event (assigning an ID when configured) and enforce the
-   * `maxEventBytes` limit. Returns the ID used plus the wire frame.
+   * `maxEventBytes` limit. Returns the ID used, the wire frame, and the
+   * ID-stamped event (for history persistence and bus fan-out).
    */
   #prepare<T>(
     event: SSEEvent<T>,
     forHistory: boolean,
-  ): { id: string | undefined; frame: string } {
+  ): { id: string | undefined; frame: string; stamped: SSEEvent<T> } {
     const id = this.#assignId(event, forHistory);
-    const frame =
-      id === undefined || event.id !== undefined
-        ? formatSSEFrame(event, { serialize: this.#serialize })
-        : formatSSEFrame({ ...event, id }, { serialize: this.#serialize });
+    const stamped =
+      id === undefined || event.id !== undefined ? event : { ...event, id };
+    const frame = formatSSEFrame(stamped, { serialize: this.#serialize });
     if (Buffer.byteLength(frame, "utf8") > this.#maxEventBytes) {
       throw new SSEError(
         `SSE frame exceeds the limit of ${this.#maxEventBytes} bytes.`,
       );
     }
-    return { id, frame };
+    return { id, frame, stamped };
   }
 
   #deliver(connection: SSEConnection, frame: string): boolean {
     try {
       return connection.writeFrame(frame);
     } catch (error) {
-      this.emit(
-        "error",
-        error instanceof Error ? error : new SSEError(String(error)),
-        connection,
-      );
+      this.emit("error", asError(error), connection);
       connection.close();
       return false;
     }
   }
 
   /**
+   * Record an event in history. Synchronous legacy stores are written
+   * inline; async stores are appended through a serialized queue so
+   * persistence preserves broadcast order. Storage failures never break
+   * live delivery — they surface via `"storageError"`.
+   */
+  #recordHistory<T>(
+    id: string | undefined,
+    frame: string,
+    stamped: SSEEvent<T>,
+    topic?: string,
+  ): void {
+    if (!this.#historyEnabled || id === undefined) return;
+    const asyncStore = this.#asyncStore;
+    if (asyncStore === undefined) {
+      if (isLegacyHistoryStore(this.#history)) {
+        this.#history.add({ id, frame });
+      }
+      return;
+    }
+    const stored: StoredSSEEvent = {
+      id,
+      sequence: this.#nextSequence,
+      data: stamped.data,
+      createdAt: Date.now(),
+    };
+    this.#nextSequence += 1;
+    if (stamped.event !== undefined) stored.event = stamped.event;
+    if (stamped.retry !== undefined) stored.retry = stamped.retry;
+    if (topic !== undefined) stored.topic = topic;
+    this.#persistQueue = this.#persistQueue.then(async () => {
+      try {
+        await asyncStore.append(stored);
+      } catch (error) {
+        this.emit("storageError", asError(error));
+      }
+    });
+  }
+
+  /** Replay missed events from an async store to a reconnecting client. */
+  async #replayFromStore(
+    connection: SSEConnection,
+    lastEventId: string,
+  ): Promise<void> {
+    const store = this.#asyncStore;
+    if (store === undefined) return;
+    let events: StoredSSEEvent[];
+    try {
+      events = await store.getAfter(lastEventId);
+    } catch (error) {
+      this.emit("storageError", asError(error));
+      return;
+    }
+    for (const stored of events) {
+      if (connection.closed || this.#closed) break;
+      const toSend: SSEEvent = { data: stored.data };
+      toSend.id = stored.id;
+      if (stored.event !== undefined) toSend.event = stored.event;
+      if (stored.retry !== undefined) toSend.retry = stored.retry;
+      let frame: string;
+      try {
+        frame = formatSSEFrame(toSend, { serialize: this.#serialize });
+      } catch (error) {
+        this.emit("storageError", asError(error));
+        continue;
+      }
+      this.#deliver(connection, frame);
+    }
+  }
+
+  /** Publish an envelope to the bus without breaking live delivery. */
+  #publishToBus(envelope: SSEBusEnvelope): void {
+    if (this.#bus === undefined || this.#closed) return;
+    void this.#bus.publish(envelope).catch((error: unknown) => {
+      this.emit("busError", asError(error));
+    });
+  }
+
+  /**
+   * Deliver an envelope received from another node: fan out locally and
+   * record in local history, but never re-publish (loop prevention via
+   * the envelope's `origin`).
+   */
+  #ingestRemote(envelope: SSEBusEnvelope): void {
+    if (this.#closed || envelope.origin === this.#nodeId) return;
+    let prepared: {
+      id: string | undefined;
+      frame: string;
+      stamped: SSEEvent;
+    };
+    try {
+      prepared = this.#prepare(envelope.event, true);
+    } catch (error) {
+      this.emit("busError", asError(error));
+      return;
+    }
+    const { id, frame, stamped } = prepared;
+    if (envelope.topic !== undefined) {
+      for (const connectionId of this.#topics.getSubscribers(envelope.topic)) {
+        const connection = this.#connections.get(connectionId);
+        if (connection !== undefined) this.#deliver(connection, frame);
+      }
+    } else {
+      for (const connection of [...this.#connections.values()]) {
+        this.#deliver(connection, frame);
+      }
+    }
+    this.#recordHistory(id, frame, stamped, envelope.topic);
+  }
+
+  /**
    * Broadcast an event to **all** connected clients.
+   *
+   * Consistency model: live delivery happens first and synchronously;
+   * history persistence follows asynchronously. A storage failure never
+   * fails the broadcast — it surfaces via `"storageError"`.
+   *
    * @returns Number of clients the event was accepted by.
    */
   broadcast<T>(event: SSEEvent<T>): number {
     if (this.#closed) return 0;
-    const { id, frame } = this.#prepare(event, true);
-    if (this.#historyEnabled && id !== undefined) {
-      this.#history.add({ id, frame });
-    }
+    const { id, frame, stamped } = this.#prepare(event, true);
     let count = 0;
     for (const connection of [...this.#connections.values()]) {
       if (this.#deliver(connection, frame)) count += 1;
     }
+    this.#recordHistory(id, frame, stamped);
+    this.#publishToBus({ origin: this.#nodeId, event: stamped });
     return count;
   }
 
@@ -318,8 +504,9 @@ export class SSEServer extends EventEmitter {
    * @returns `true` if the connection exists and accepted the event.
    *
    * Note: direct messages are intentionally **not** stored in history
-   * (history is a global log — storing private messages there would
-   * replay them to whoever reconnects next). Documented in the README.
+   * and are **not** published to the bus (history is a global log —
+   * storing private messages there would replay them to whoever
+   * reconnects next). Documented in the README.
    */
   sendTo<T>(connectionId: string, event: SSEEvent<T>): boolean {
     const connection = this.#connections.get(connectionId);
@@ -331,16 +518,14 @@ export class SSEServer extends EventEmitter {
 
   /**
    * Return a scoped broadcaster for a topic. Topic broadcasts are stored
-   * in the (global, positional — not per-topic) history like broadcasts.
+   * in the (global, positional — not per-topic) history like broadcasts,
+   * tagged with the topic when the store supports it.
    */
   to(topic: Topic): TopicBroadcaster {
     return {
       broadcast: <T>(event: SSEEvent<T>): number => {
         if (this.#closed) return 0;
-        const { id, frame } = this.#prepare(event, true);
-        if (this.#historyEnabled && id !== undefined) {
-          this.#history.add({ id, frame });
-        }
+        const { id, frame, stamped } = this.#prepare(event, true);
         let count = 0;
         for (const connectionId of this.#topics.getSubscribers(topic)) {
           const connection = this.#connections.get(connectionId);
@@ -348,6 +533,8 @@ export class SSEServer extends EventEmitter {
             count += 1;
           }
         }
+        this.#recordHistory(id, frame, stamped, topic);
+        this.#publishToBus({ origin: this.#nodeId, topic, event: stamped });
         return count;
       },
     };
@@ -402,10 +589,19 @@ export class SSEServer extends EventEmitter {
 
   /** Snapshot of current server state. */
   getStats(): SSEServerStats {
+    let historySize = 0;
+    if (this.#historyEnabled) {
+      if (isLegacyHistoryStore(this.#history)) {
+        historySize = this.#history.size;
+      } else {
+        const size = (this.#history as { size?: unknown }).size;
+        historySize = typeof size === "number" ? size : 0;
+      }
+    }
     return {
       connections: this.#connections.size,
       topics: this.#topics.size,
-      historySize: this.#historyEnabled ? this.#history.size : 0,
+      historySize,
       closed: this.#closed,
     };
   }
@@ -420,11 +616,7 @@ export class SSEServer extends EventEmitter {
         try {
           connection.writeFrame(frame);
         } catch (error) {
-          this.emit(
-            "error",
-            error instanceof Error ? error : new SSEError(String(error)),
-            connection,
-          );
+          this.emit("error", asError(error), connection);
           connection.close();
         }
       }
@@ -447,8 +639,13 @@ export class SSEServer extends EventEmitter {
   /**
    * Gracefully shut down: stops accepting new connections, stops the
    * heartbeat timer, closes all active connections, clears topic
-   * subscriptions and history, and releases resources. Resolves only
-   * after cleanup is complete. Safe to call repeatedly.
+   * subscriptions, releases the bus, and resolves only after cleanup is
+   * complete. Safe to call repeatedly.
+   *
+   * Local (synchronous) history is cleared; async/shared stores
+   * (Redis, …) are intentionally left intact so other nodes keep their
+   * history. Awaiting {@link flushHistory} before `close()` guarantees
+   * all enqueued writes have settled.
    */
   close(): Promise<void> {
     if (this.#closePromise !== undefined) return this.#closePromise;
@@ -459,17 +656,31 @@ export class SSEServer extends EventEmitter {
       try {
         connection.close();
       } catch (error) {
-        this.emit(
-          "error",
-          error instanceof Error ? error : new SSEError(String(error)),
-          connection,
-        );
+        this.emit("error", asError(error), connection);
       }
     }
     this.#connections.clear();
     this.#topics.clear();
-    this.#history.clear();
-    this.#closePromise = Promise.resolve();
+    if (this.#asyncStore === undefined && isLegacyHistoryStore(this.#history)) {
+      this.#history.clear();
+    }
+    const bus = this.#bus;
+    const unsubscribe = this.#unsubscribeBus;
+    this.#closePromise = (async (): Promise<void> => {
+      await this.#persistQueue;
+      if (bus !== undefined) {
+        try {
+          unsubscribe?.();
+        } catch (error) {
+          this.emit("busError", asError(error));
+        }
+        try {
+          await bus.close();
+        } catch (error) {
+          this.emit("busError", asError(error));
+        }
+      }
+    })();
     return this.#closePromise;
   }
 
@@ -479,6 +690,8 @@ export class SSEServer extends EventEmitter {
   on(event: "connection", listener: ConnectionListener): this;
   on(event: "disconnect", listener: DisconnectListener): this;
   on(event: "error", listener: ErrorListener): this;
+  on(event: "storageError", listener: StorageErrorListener): this;
+  on(event: "busError", listener: BusErrorListener): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   on(event: string, listener: (...args: any[]) => void): this {
     return super.on(event, listener);
@@ -488,6 +701,8 @@ export class SSEServer extends EventEmitter {
   once(event: "connection", listener: ConnectionListener): this;
   once(event: "disconnect", listener: DisconnectListener): this;
   once(event: "error", listener: ErrorListener): this;
+  once(event: "storageError", listener: StorageErrorListener): this;
+  once(event: "busError", listener: BusErrorListener): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   once(event: string, listener: (...args: any[]) => void): this {
     return super.once(event, listener);
@@ -497,6 +712,8 @@ export class SSEServer extends EventEmitter {
   off(event: "connection", listener: ConnectionListener): this;
   off(event: "disconnect", listener: DisconnectListener): this;
   off(event: "error", listener: ErrorListener): this;
+  off(event: "storageError", listener: StorageErrorListener): this;
+  off(event: "busError", listener: BusErrorListener): this;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   off(event: string, listener: (...args: any[]) => void): this {
     return super.off(event, listener);
@@ -518,6 +735,20 @@ export class SSEServer extends EventEmitter {
   /** Convenience alias for `on("error", listener)`. */
   onError(listener: ErrorListener): this {
     return this.on("error", listener);
+  }
+
+  /**
+   * Convenience alias for `on("storageError", listener)` — fires when
+   * an async history-store write or replay fails. Live delivery is
+   * never affected.
+   */
+  onStorageError(listener: StorageErrorListener): this {
+    return this.on("storageError", listener);
+  }
+
+  /** Convenience alias for `on("busError", listener)`. */
+  onBusError(listener: BusErrorListener): this {
+    return this.on("busError", listener);
   }
 }
 

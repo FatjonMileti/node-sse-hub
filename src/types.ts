@@ -8,6 +8,7 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { SSEConnection } from "./SSEConnection.js";
+import type { SSEEventBus, SSEEventStore } from "./store.js";
 
 export type { IncomingMessage, ServerResponse };
 
@@ -68,10 +69,20 @@ export interface SSEHistoryStore {
 export interface HistoryOptions {
   /** Enable history storage and `Last-Event-ID` replay. Default `false`. */
   enabled?: boolean;
-  /** Maximum stored events. Oldest entries are evicted. Default `100`. */
+  /**
+   * Maximum stored events (used only when the server creates the default
+   * synchronous in-memory store). Custom stores manage their own bounds.
+   * Default `100`.
+   */
   maxEvents?: number;
-  /** Custom storage backend. Defaults to in-memory storage. */
-  store?: SSEHistoryStore;
+  /**
+   * Custom storage backend. Accepts either the legacy synchronous
+   * {@link SSEHistoryStore} (pre-formatted frames) or the async
+   * {@link SSEEventStore} (structured events, e.g. `MemoryEventStore`
+   * or the Redis adapter from `sse-kit/redis`). Defaults to an
+   * in-memory synchronous store.
+   */
+  store?: SSEHistoryStore | SSEEventStore;
 }
 
 /** Options controlling automatic heartbeat (keep-alive) comments. */
@@ -147,6 +158,18 @@ export interface SSEServerOptions {
   maxEventBytes?: number;
   /** Custom serializer for non-string `data`. Defaults to `JSON.stringify`. */
   serialize?: SSESerializer;
+  /**
+   * Optional distributed event bus (e.g. the Redis adapter from
+   * `sse-kit/redis`). When set, broadcasts are also published to the bus
+   * and envelopes received from other nodes are delivered locally.
+   * Core package has no bus implementation — this is an extension point.
+   */
+  bus?: SSEEventBus;
+  /**
+   * Stable ID for this node on the bus (used for loop prevention).
+   * Defaults to a random UUID.
+   */
+  nodeId?: string;
 }
 
 /** Listener for new connections: `(connection, context) => void`. */
@@ -160,6 +183,12 @@ export type DisconnectListener = (connection: SSEConnection) => void;
 
 /** Listener for errors: `(error, connection?) => void`. */
 export type ErrorListener = (error: Error, connection?: SSEConnection) => void;
+
+/** Listener for async history-store failures: `(error) => void`. */
+export type StorageErrorListener = (error: Error) => void;
+
+/** Listener for event-bus failures: `(error) => void`. */
+export type BusErrorListener = (error: Error) => void;
 
 /** Scoped broadcaster returned by `sse.to(topic)`. */
 export interface TopicBroadcaster {

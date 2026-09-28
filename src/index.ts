@@ -1,0 +1,55 @@
+/**
+ * `sse-kit` — a lightweight, framework-friendly Server-Sent Events (SSE)
+ * library for Node.js.
+ *
+ * @example
+ * ```ts
+ * import { SSEServer } from "sse-kit";
+ *
+ * const sse = new SSEServer({ heartbeatInterval: 30_000 });
+ *
+ * // Express / Fastify / native http: pass the raw req & res through.
+ * sse.connect(req, res);
+ *
+ * sse.broadcast({ event: "ping", data: { ok: true } });
+ * ```
+ */
+
+export { SSEServer } from "./SSEServer.js";
+export { SSEConnection } from "./SSEConnection.js";
+export {
+  formatSSEFrame,
+  formatDataLines,
+  formatHeartbeat,
+  parseLastEventId,
+  InMemoryHistoryStore,
+  DEFAULT_SERIALIZE,
+  HEARTBEAT_COMMENT,
+} from "./SSEEvent.js";
+export { TopicManager, MAX_TOPIC_LENGTH } from "./TopicManager.js";
+export {
+  SSEError,
+  ConnectionNotFoundError,
+  SSEClosedError,
+  TopicNotFoundError,
+} from "./errors.js";
+export type {
+  Topic,
+  SSEEvent,
+  SSESerializer,
+  SlowClientStrategy,
+  SSEHistoryEntry,
+  SSEHistoryStore,
+  HistoryOptions,
+  HeartbeatOptions,
+  SSEConnectionContext,
+  ConnectOptions,
+  SSEServerOptions,
+  ConnectionListener,
+  DisconnectListener,
+  ErrorListener,
+  TopicBroadcaster,
+  SSEServerStats,
+} from "./types.js";
+export type { SSEConnectionOptions } from "./SSEConnection.js";
+export type { FormatOptions } from "./SSEEvent.js";

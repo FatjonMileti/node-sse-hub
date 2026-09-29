@@ -46,11 +46,15 @@
     "fastify",
     "nodejs"
   ],
-  "author": "",
+  "author": "Fatjon Mileti",
   "license": "MIT",
+  "homepage": "https://github.com/FatjonMileti/node-sse-hub#readme",
   "repository": {
     "type": "git",
-    "url": ""
+    "url": "git+https://github.com/FatjonMileti/node-sse-hub.git"
+  },
+  "bugs": {
+    "url": "https://github.com/FatjonMileti/node-sse-hub/issues"
   },
   "engines": {
     "node": ">=18"

@@ -33,7 +33,6 @@ Create SSE streams, send events to individual clients, broadcast to everyone, pu
 | Failure hooks           | Session errors                               | `storageError` / `busError` without breaking live delivery                |
 | Runtimes                | Node + Fetch API (Bun, Deno, edge)           | Node.js (`IncomingMessage` / `ServerResponse`)                            |
 
-
 ## Installation
 
 ```bash

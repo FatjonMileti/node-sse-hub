@@ -1,6 +1,6 @@
 {
   "name": "node-sse-hub",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Hub-centric Server-Sent Events (SSE) library for Node.js: connection registry, topics, replayable history, and optional Redis clustering",
   "type": "module",
   "main": "./dist/cjs/index.cjs",

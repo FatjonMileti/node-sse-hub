@@ -80,6 +80,32 @@ describe("distributed fan-out over SSEEventBus", () => {
     await nodeB.close();
   });
 
+  it("honors exclusion lists received over the bus", async () => {
+    const { nodeA, nodeB } = twoNodes();
+    const a = createMocks();
+    const b = createMocks();
+    const connA = nodeA.connect(
+      a.req.asIncomingMessage(),
+      a.res.asServerResponse(),
+    );
+    nodeB.connect(b.req.asIncomingMessage(), b.res.asServerResponse());
+    await sleep(10);
+
+    expect(
+      nodeA.broadcast(
+        { event: "skip-sender", data: "hello" },
+        { exceptConnectionIds: [connA.id] },
+      ),
+    ).toBe(0);
+    await sleep(20);
+    // Skipped locally on the publishing node…
+    expect(a.res.body).not.toContain("skip-sender");
+    // …but delivered to clients of the other node.
+    expect(b.res.body).toContain("skip-sender");
+    await nodeA.close();
+    await nodeB.close();
+  });
+
   it("routes topic broadcasts to subscribers on other nodes", async () => {
     const { nodeA, nodeB } = twoNodes();
     const subscribed = createMocks();

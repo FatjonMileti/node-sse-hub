@@ -172,6 +172,26 @@ export interface SSEServerOptions {
   nodeId?: string;
 }
 
+/** Options accepted by {@link SSEServer.broadcast}. */
+export interface BroadcastOptions {
+  /**
+   * Connection IDs to skip. Unknown IDs are ignored.
+   *
+   * The canonical use case is optimistic UI: the sender already applied
+   * its own change locally, so it does not need the event echoed back.
+   * Unlike `sendTo` loops, excluded broadcasts still write history and
+   * publish to the bus — the event is global, only its delivery is
+   * scoped. Note the exclusion is evaluated against this node's
+   * connection registry; envelopes forwarded over the bus carry the
+   * exclusion list so other nodes honor it too.
+   *
+   * A reconnecting *excluded* client may still receive the event via
+   * `Last-Event-ID` replay (history is global) — design idempotent
+   * consumers.
+   */
+  exceptConnectionIds?: readonly string[];
+}
+
 /** Listener for new connections: `(connection, context) => void`. */
 export type ConnectionListener = (
   connection: SSEConnection,
@@ -202,4 +222,27 @@ export interface SSEServerStats {
   topics: number;
   historySize: number;
   closed: boolean;
+}
+
+/**
+ * Resolved server configuration, as returned by
+ * {@link SSEServer.getOptions}. Every field is the effective value after
+ * defaults are applied — useful for tests ("did I configure the 15s
+ * heartbeat?") and for logging startup config. A fresh object is
+ * returned on each call; mutating it affects nothing.
+ */
+export interface SSEServerResolvedOptions {
+  generateEventId: boolean;
+  heartbeatInterval: number;
+  heartbeatComment: string;
+  historyEnabled: boolean;
+  maxBufferedEvents: number;
+  slowClientStrategy: SlowClientStrategy;
+  maxConnections: number;
+  maxTopicsPerConnection: number;
+  maxEventBytes: number;
+  /** Whether a distributed event bus was configured. */
+  hasBus: boolean;
+  /** This node's ID on the event bus. */
+  nodeId: string;
 }

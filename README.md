@@ -73,6 +73,17 @@ app.listen(3000);
 
 See [`examples/express.ts`](examples/express.ts).
 
+### Express response-lifecycle contract
+
+`connect()` takes over the response socket, so the route must give it a pristine response:
+
+- **Headers must not be sent yet.** Don't set headers, write, or end the response before calling `connect()` — the hub writes the `200` + SSE headers itself.
+- **No competing response finishers.** Don't call `next()` on to handlers/middleware that `res.send()`/`res.end()`, and don't end the response after `connect()` returns. Disconnects are detected via request abort / response close / write failures, and cleanup is idempotent.
+- **No body parsing needed.** SSE streams are GET requests without bodies; body-parser middleware on the route is unnecessary (harmless, but pointless).
+- **Disable compression for the route.** Response compression buffers the stream and defeats SSE flushing — exclude the SSE route from `compression()` (or any buffering proxy config; the hub already sends `X-Accel-Buffering: no` for nginx).
+- **One `connect()` per response.** Calling `connect()` twice on the same response throws (`ERR_HTTP_HEADERS_SENT` from the second `writeHead`); no second connection is registered. If you need per-client setup (greeting event, topic subscriptions), do it with the returned connection inside the same handler.
+- **Auth first.** Express 4's `req`/`res` are native HTTP objects, so they pass straight through — run your auth middleware (cookies, signed URLs) _before_ the `connect()` call; the hub deliberately has no auth.
+
 ## Native Node example
 
 ```ts
@@ -144,6 +155,30 @@ console.log(`Delivered to ${count} clients`);
 ```
 
 `broadcast()` sends to every connected client and returns the number of clients that accepted the event. One slow or broken client never blocks the others.
+
+### Excluding connections (optimistic UI)
+
+When the sender already applied its own change locally, echoing the event back is wasteful — pass `exceptConnectionIds` instead of hand-rolling a `getConnections()` + `sendTo()` loop:
+
+```ts
+app.get("/events/:userId", (req, res) => {
+  const connection = sse.connect(req, res);
+  // Remember which connection belongs to whom:
+  userConnections.set(req.params.userId, connection.id);
+  sse.send({ event: "connected", data: { userId: req.params.userId } });
+});
+
+app.post("/orders/:userId", (req, res) => {
+  const senderId = userConnections.get(req.params.userId);
+  sse.broadcast(
+    { event: "order-updated", data: { orderId: "7" } },
+    { exceptConnectionIds: senderId === undefined ? [] : [senderId] },
+  );
+  res.json({ ok: true });
+});
+```
+
+Unlike `sendTo`, an excluded broadcast **still writes history and publishes to the bus** — the event is global, only its delivery is scoped (unknown IDs are ignored, and the exclusion list travels in the bus envelope so other nodes honor it too). The returned count excludes skipped connections. One caveat: history is global, so a reconnecting _excluded_ client may receive the event via `Last-Event-ID` replay — keep consumers idempotent.
 
 ## Individual connections
 
@@ -380,6 +415,22 @@ const sse = new SSEServer({ heartbeatInterval: 30_000 });
 
 Every interval the server sends an SSE comment (`: heartbeat`) to each client, keeping proxies/load balancers from treating idle connections as dead. Heartbeats are comments — never exposed as application events — and timers are cleaned up on `close()` (the timer is also `unref`'d so it won't hold the process open).
 
+Testing heartbeats without waiting out production intervals: assert the resolved config, and exercise delivery with a short-interval instance.
+
+```ts
+// No 15s waits — assert the effective configuration directly:
+expect(sse.getOptions().heartbeatInterval).toBe(15_000);
+
+// And verify delivery mechanics with a fast instance:
+const fast = new SSEServer({ heartbeatInterval: 20 });
+fast.connect(req, res);
+await sleep(75);
+const heartbeats = res.chunks.filter((c) => c.startsWith(":"));
+expect(heartbeats.length).toBeGreaterThanOrEqual(2);
+```
+
+`getOptions()` returns the full effective configuration after defaults are applied (`heartbeatComment`, `historyEnabled`, caps, `hasBus`, `nodeId`, …) — handy for tests and startup logging. A fresh object is returned on each call. `getStats()` keeps reporting live state (`connections`, `topics`, `historySize`, `closed`).
+
 ## Connection lifecycle
 
 ```ts
@@ -443,6 +494,8 @@ const sse = new SSEServer({
 });
 ```
 
+Read the effective configuration back with `sse.getOptions()` (see [Heartbeats](#heartbeats)).
+
 ## Installation matrix
 
 | You want                      | Install                                                                                                                     |
@@ -458,6 +511,8 @@ const sse = new SSEServer({
 import type {
   SSEEvent,
   SSEServerOptions,
+  SSEServerResolvedOptions,
+  BroadcastOptions,
   SSEConnectionContext,
   SSEHistoryStore,
   HeartbeatOptions,
@@ -473,32 +528,36 @@ const event: SSEEvent<{ invoiceId: string }> = {
 };
 ```
 
+CommonJS consumers (`module: node16`, no `"type": "module"`) are supported: `require("node-sse-hub")` resolves to the `.cjs` build with matching `.d.cts` types via conditional exports — no `resolution-mode` attributes or suppressions needed.
+
 ## API reference
 
-| Method                                      | Description                                                                      |
-| ------------------------------------------- | -------------------------------------------------------------------------------- |
-| `new SSEServer(options?)`                   | Create a server instance                                                         |
-| `sse.connect(req, res, opts?)`              | Accept a client; returns `SSEConnection`                                         |
-| `sse.broadcast(event)` / `sse.send(event)`  | Send to all clients; returns recipient count                                     |
-| `sse.sendTo(id, event)`                     | Send to one client; returns `boolean`                                            |
-| `sse.to(topic).broadcast(event)`            | Send to topic subscribers; returns count                                         |
-| `sse.disconnect(id)`                        | Close a client; returns `boolean`                                                |
-| `sse.getConnection(id)`                     | Look up a client                                                                 |
-| `sse.getConnections()`                      | All connected clients                                                            |
-| `sse.getTopics()`                           | Topics with ≥1 subscriber                                                        |
-| `sse.getTopicSubscribers(topic)`            | Subscribed connections                                                           |
-| `sse.getTopicSubscriberCount(topic)`        | Subscriber count                                                                 |
-| `sse.getStats()`                            | `{ connections, topics, historySize, closed }`                                   |
-| `sse.on / once / off`                       | Typed `connection` / `disconnect` / `error` / `storageError` / `busError` events |
-| `sse.onConnection / onDisconnect / onError` | Convenience listener aliases                                                     |
-| `sse.onStorageError / onBusError`           | Async persistence / bus failure hooks (live delivery unaffected)                 |
-| `sse.getEventStore()`                       | The configured history store                                                     |
-| `await sse.flushHistory()`                  | Wait for enqueued history writes to settle                                       |
-| `await sse.close()`                         | Graceful shutdown (idempotent)                                                   |
-| `connection.send(event)`                    | Send to this client                                                              |
-| `connection.subscribe / unsubscribe(topic)` | Manage topic membership                                                          |
-| `connection.getTopics()`                    | This client's topics                                                             |
-| `connection.close()`                        | Close this client (idempotent)                                                   |
+| Method                                          | Description                                                                      |
+| ----------------------------------------------- | -------------------------------------------------------------------------------- |
+| `new SSEServer(options?)`                       | Create a server instance                                                         |
+| `sse.connect(req, res, opts?)`                  | Accept a client; returns `SSEConnection`                                         |
+| `sse.broadcast(event)` / `sse.send(event)`      | Send to all clients; returns recipient count                                     |
+| `sse.broadcast(event, { exceptConnectionIds })` | Send to all-but-excluded (history + bus still recorded); returns count           |
+| `sse.sendTo(id, event)`                         | Send to one client; returns `boolean`                                            |
+| `sse.to(topic).broadcast(event)`                | Send to topic subscribers; returns count                                         |
+| `sse.disconnect(id)`                            | Close a client; returns `boolean`                                                |
+| `sse.getConnection(id)`                         | Look up a client                                                                 |
+| `sse.getConnections()`                          | All connected clients                                                            |
+| `sse.getTopics()`                               | Topics with ≥1 subscriber                                                        |
+| `sse.getTopicSubscribers(topic)`                | Subscribed connections                                                           |
+| `sse.getTopicSubscriberCount(topic)`            | Subscriber count                                                                 |
+| `sse.getStats()`                                | `{ connections, topics, historySize, closed }`                                   |
+| `sse.getOptions()`                              | Effective config after defaults (`heartbeatInterval`, caps, `hasBus`, …)         |
+| `sse.on / once / off`                           | Typed `connection` / `disconnect` / `error` / `storageError` / `busError` events |
+| `sse.onConnection / onDisconnect / onError`     | Convenience listener aliases                                                     |
+| `sse.onStorageError / onBusError`               | Async persistence / bus failure hooks (live delivery unaffected)                 |
+| `sse.getEventStore()`                           | The configured history store                                                     |
+| `await sse.flushHistory()`                      | Wait for enqueued history writes to settle                                       |
+| `await sse.close()`                             | Graceful shutdown (idempotent)                                                   |
+| `connection.send(event)`                        | Send to this client                                                              |
+| `connection.subscribe / unsubscribe(topic)`     | Manage topic membership                                                          |
+| `connection.getTopics()`                        | This client's topics                                                             |
+| `connection.close()`                            | Close this client (idempotent)                                                   |
 
 Error classes: `SSEError` (base), `ConnectionNotFoundError`, `SSEClosedError`, `TopicNotFoundError`. Normal lifecycle misses (unknown IDs, empty topics) return `false`/`0`/`[]` rather than throwing.
 

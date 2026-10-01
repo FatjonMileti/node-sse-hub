@@ -78,6 +78,12 @@ export interface SSEBusEnvelope {
   origin: string;
   /** Topic for topic-scoped broadcasts, if any. */
   topic?: string;
+  /**
+   * Connection IDs to skip on delivery. Carried over the bus so an
+   * exclusion broadcast (`broadcast(event, { exceptConnectionIds })`)
+   * is honored cluster-wide. Unknown IDs are ignored.
+   */
+  exceptConnectionIds?: string[];
   /** The application event. */
   event: SSEEvent;
 }

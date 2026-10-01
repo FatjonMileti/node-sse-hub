@@ -58,3 +58,6 @@ jobs:
 
       - name: Pack dry-run
         run: npm pack --dry-run
+
+      - name: Verify CJS consumer against packed tarball
+        run: npm run verify:cjs

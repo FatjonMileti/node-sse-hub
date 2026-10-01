@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import { SSEClosedError, SSEError } from "../src/errors.js";
 import { SSEServer } from "../src/SSEServer.js";
+import type { SSEBusEnvelope, SSEEventBus } from "../src/store.js";
+import { MemoryEventStore } from "../src/store.js";
 import { createMocks } from "./helpers.js";
 
 function connectedServer(
@@ -359,6 +361,163 @@ describe("validation and limits", () => {
       historySize: 1,
       closed: false,
     });
+    await sse.close();
+  });
+});
+
+describe("broadcast exclusions", () => {
+  function capturingBus(): {
+    bus: SSEEventBus;
+    published: SSEBusEnvelope[];
+  } {
+    const published: SSEBusEnvelope[] = [];
+    const bus: SSEEventBus = {
+      publish: (envelope) => {
+        published.push(envelope);
+        return Promise.resolve();
+      },
+      subscribe: () => Promise.resolve(() => {}),
+      close: () => Promise.resolve(),
+    };
+    return { bus, published };
+  }
+
+  it("delivers to all-but-excluded, still writes history and publishes to the bus", async () => {
+    const store = new MemoryEventStore();
+    const { bus, published } = capturingBus();
+    const sse = new SSEServer({ history: { enabled: true, store }, bus });
+    const mocks = [createMocks(), createMocks(), createMocks()].map((m) => ({
+      ...m,
+      connection: sse.connect(
+        m.req.asIncomingMessage(),
+        m.res.asServerResponse(),
+      ),
+    }));
+    const sender = mocks[0]?.connection;
+    if (sender === undefined) throw new Error("test setup failed");
+
+    const count = sse.broadcast(
+      { event: "order-updated", data: { orderId: "7" } },
+      { exceptConnectionIds: [sender.id, "unknown-id"] },
+    );
+
+    expect(count).toBe(2);
+    expect(mocks[0]?.res.body).not.toContain("order-updated");
+    expect(mocks[1]?.res.body).toContain("order-updated");
+    expect(mocks[2]?.res.body).toContain("order-updated");
+
+    // History is still recorded despite the exclusion.
+    await sse.flushHistory();
+    const stored = await store.getRecent(10);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toMatchObject({ event: "order-updated" });
+
+    // The bus envelope is published and carries the exclusion list.
+    expect(published).toHaveLength(1);
+    expect(published[0]?.exceptConnectionIds).toEqual([
+      sender.id,
+      "unknown-id",
+    ]);
+    await sse.close();
+  });
+
+  it("send() forwards broadcast options", async () => {
+    const { sse, mocks } = connectedServer();
+    const sender = mocks[0]?.connection;
+    if (sender === undefined) throw new Error("test setup failed");
+    expect(
+      sse.send({ data: "skip-sender" }, { exceptConnectionIds: [sender.id] }),
+    ).toBe(2);
+    expect(mocks[0]?.res.body).not.toContain("skip-sender");
+    expect(mocks[1]?.res.body).toContain("skip-sender");
+    await sse.close();
+  });
+
+  it("excluding every connection delivers to none but still records history", async () => {
+    const store = new MemoryEventStore();
+    const sse = new SSEServer({ history: { enabled: true, store } });
+    const mocks = [createMocks(), createMocks()].map((m) => ({
+      ...m,
+      connection: sse.connect(
+        m.req.asIncomingMessage(),
+        m.res.asServerResponse(),
+      ),
+    }));
+    const ids = mocks.map((m) => m.connection.id);
+    expect(
+      sse.broadcast({ data: "nobody" }, { exceptConnectionIds: ids }),
+    ).toBe(0);
+    for (const m of mocks) {
+      expect(m.res.body).not.toContain("nobody");
+    }
+    await sse.flushHistory();
+    expect(await store.getRecent(10)).toHaveLength(1);
+    await sse.close();
+  });
+});
+
+describe("getOptions", () => {
+  it("reports defaults", async () => {
+    const sse = new SSEServer();
+    expect(sse.getOptions()).toEqual({
+      generateEventId: false,
+      heartbeatInterval: 0,
+      heartbeatComment: "heartbeat",
+      historyEnabled: false,
+      maxBufferedEvents: 100,
+      slowClientStrategy: "disconnect",
+      maxConnections: 10_000,
+      maxTopicsPerConnection: 100,
+      maxEventBytes: 1_048_576,
+      hasBus: false,
+      nodeId: sse.nodeId,
+    });
+    await sse.close();
+  });
+
+  it("reports configured values without waiting out real timers", async () => {
+    const bus: SSEEventBus = {
+      publish: () => Promise.resolve(),
+      subscribe: () => Promise.resolve(() => {}),
+      close: () => Promise.resolve(),
+    };
+    const sse = new SSEServer({
+      generateEventId: true,
+      heartbeatInterval: 15_000,
+      heartbeatComment: "ping",
+      history: { enabled: true },
+      maxBufferedEvents: 10,
+      slowClientStrategy: "drop-oldest",
+      maxConnections: 5,
+      maxTopicsPerConnection: 3,
+      maxEventBytes: 1024,
+      bus,
+      nodeId: "test-node",
+    });
+    expect(sse.getOptions()).toEqual({
+      generateEventId: true,
+      heartbeatInterval: 15_000,
+      heartbeatComment: "ping",
+      historyEnabled: true,
+      maxBufferedEvents: 10,
+      slowClientStrategy: "drop-oldest",
+      maxConnections: 5,
+      maxTopicsPerConnection: 3,
+      maxEventBytes: 1024,
+      hasBus: true,
+      nodeId: "test-node",
+    });
+    await sse.close();
+  });
+
+  it("returns a fresh object on every call", async () => {
+    const sse = new SSEServer();
+    const first = sse.getOptions();
+    const second = sse.getOptions();
+    expect(first).not.toBe(second);
+    expect(first).toEqual(second);
+    first.heartbeatInterval = 999;
+    expect(sse.getOptions().heartbeatInterval).toBe(0);
     await sse.close();
   });
 });

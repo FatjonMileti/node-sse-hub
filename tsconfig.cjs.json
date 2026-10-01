@@ -5,7 +5,7 @@
     "moduleResolution": "Node",
     "verbatimModuleSyntax": false,
     "outDir": "dist/cjs",
-    "declaration": false,
+    "declaration": true,
     "declarationMap": false,
     "sourceMap": false
   }

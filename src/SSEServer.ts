@@ -28,6 +28,7 @@ import {
 } from "./store.js";
 import { TopicManager } from "./TopicManager.js";
 import type {
+  BroadcastOptions,
   BusErrorListener,
   ConnectOptions,
   ConnectionListener,
@@ -38,6 +39,7 @@ import type {
   SSEHistoryStore,
   SSESerializer,
   SSEServerOptions,
+  SSEServerResolvedOptions,
   SSEServerStats,
   SlowClientStrategy,
   StorageErrorListener,
@@ -460,13 +462,19 @@ export class SSEServer extends EventEmitter {
       return;
     }
     const { id, frame, stamped } = prepared;
+    const excluded =
+      envelope.exceptConnectionIds !== undefined
+        ? new Set(envelope.exceptConnectionIds)
+        : undefined;
     if (envelope.topic !== undefined) {
       for (const connectionId of this.#topics.getSubscribers(envelope.topic)) {
+        if (excluded?.has(connectionId)) continue;
         const connection = this.#connections.get(connectionId);
         if (connection !== undefined) this.#deliver(connection, frame);
       }
     } else {
       for (const connection of [...this.#connections.values()]) {
+        if (excluded?.has(connection.id)) continue;
         this.#deliver(connection, frame);
       }
     }
@@ -476,27 +484,42 @@ export class SSEServer extends EventEmitter {
   /**
    * Broadcast an event to **all** connected clients.
    *
+   * Pass `{ exceptConnectionIds }` for optimistic-UI fan-out: the
+   * listed connections are skipped locally *and* on every node reached
+   * over the bus, while history recording and bus publishing proceed
+   * exactly as for a full broadcast. Unknown IDs are ignored.
+   *
    * Consistency model: live delivery happens first and synchronously;
    * history persistence follows asynchronously. A storage failure never
    * fails the broadcast — it surfaces via `"storageError"`.
    *
-   * @returns Number of clients the event was accepted by.
+   * @returns Number of clients the event was accepted by (skipped
+   * connections are not counted).
    */
-  broadcast<T>(event: SSEEvent<T>): number {
+  broadcast<T>(event: SSEEvent<T>, options: BroadcastOptions = {}): number {
     if (this.#closed) return 0;
+    const excluded =
+      options.exceptConnectionIds !== undefined
+        ? new Set(options.exceptConnectionIds)
+        : undefined;
     const { id, frame, stamped } = this.#prepare(event, true);
     let count = 0;
     for (const connection of [...this.#connections.values()]) {
+      if (excluded?.has(connection.id)) continue;
       if (this.#deliver(connection, frame)) count += 1;
     }
     this.#recordHistory(id, frame, stamped);
-    this.#publishToBus({ origin: this.#nodeId, event: stamped });
+    this.#publishToBus({
+      origin: this.#nodeId,
+      event: stamped,
+      ...(excluded !== undefined ? { exceptConnectionIds: [...excluded] } : {}),
+    });
     return count;
   }
 
-  /** Alias for {@link broadcast}. */
-  send<T>(event: SSEEvent<T>): number {
-    return this.broadcast(event);
+  /** Alias for {@link broadcast} (also accepts `BroadcastOptions`). */
+  send<T>(event: SSEEvent<T>, options: BroadcastOptions = {}): number {
+    return this.broadcast(event, options);
   }
 
   /**
@@ -586,6 +609,28 @@ export class SSEServer extends EventEmitter {
   }
 
   // ------------------------------------------------------------------ stats
+
+  /**
+   * The effective configuration after defaults are applied. Useful for
+   * asserting setup in tests (e.g. `getOptions().heartbeatInterval`)
+   * without waiting out real timers, and for logging startup config.
+   * Returns a fresh object on every call.
+   */
+  getOptions(): SSEServerResolvedOptions {
+    return {
+      generateEventId: this.#generateEventId,
+      heartbeatInterval: this.#heartbeatInterval,
+      heartbeatComment: this.#heartbeatComment,
+      historyEnabled: this.#historyEnabled,
+      maxBufferedEvents: this.#maxBufferedEvents,
+      slowClientStrategy: this.#slowClientStrategy,
+      maxConnections: this.#maxConnections,
+      maxTopicsPerConnection: this.#maxTopicsPerConnection,
+      maxEventBytes: this.#maxEventBytes,
+      hasBus: this.#bus !== undefined,
+      nodeId: this.#nodeId,
+    };
+  }
 
   /** Snapshot of current server state. */
   getStats(): SSEServerStats {

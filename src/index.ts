@@ -54,6 +54,8 @@ export type {
   SSEConnectionContext,
   ConnectOptions,
   SSEServerOptions,
+  SSEServerResolvedOptions,
+  BroadcastOptions,
   ConnectionListener,
   DisconnectListener,
   ErrorListener,

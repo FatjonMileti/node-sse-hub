@@ -1,0 +1,6 @@
+{
+  "name": "cjs-consumer-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Regression fixture: CommonJS consumer (module: node16, no type: module). Must typecheck with zero suppressions against the packed tarball."
+}

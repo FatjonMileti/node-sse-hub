@@ -1,6 +1,6 @@
 {
   "name": "node-sse-hub",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Hub-centric Server-Sent Events (SSE) library for Node.js: connection registry, topics, replayable history, and optional Redis clustering",
   "type": "module",
   "main": "./dist/cjs/index.cjs",
@@ -8,12 +8,20 @@
   "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
+      "types": {
+        "import": "./dist/index.d.ts",
+        "require": "./dist/cjs/index.d.cts",
+        "default": "./dist/index.d.ts"
+      },
       "import": "./dist/index.js",
       "require": "./dist/cjs/index.cjs"
     },
     "./redis": {
-      "types": "./dist/redis.d.ts",
+      "types": {
+        "import": "./dist/redis.d.ts",
+        "require": "./dist/cjs/redis.d.cts",
+        "default": "./dist/redis.d.ts"
+      },
       "import": "./dist/redis.js",
       "require": "./dist/cjs/redis.cjs"
     },
@@ -31,6 +39,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:integration": "SSE_KIT_TEST_REDIS=1 vitest run tests/redis-integration.test.ts",
+    "verify:cjs": "npm pack --silent >/dev/null && ./scripts/verify-cjs-fixture.sh",
     "lint": "eslint src tests examples",
     "format": "prettier --write \"src/**/*.ts\" \"tests/**/*.ts\" \"examples/**/*.ts\" \"*.{json,md}\"",
     "format:check": "prettier --check \"src/**/*.ts\" \"tests/**/*.ts\" \"examples/**/*.ts\" \"*.{json,md}\"",
